@@ -2,7 +2,7 @@ package response
 
 import (
 	"bytes"
-	"tcp2http/internal/headers"
+	"pier/internal/headers"
 	"testing"
 )
 

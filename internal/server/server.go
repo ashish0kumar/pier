@@ -3,8 +3,8 @@ package server
 import (
 	"fmt"
 	"net"
-	"tcp2http/internal/request"
-	"tcp2http/internal/response"
+	"pier/internal/request"
+	"pier/internal/response"
 	"time"
 )
 

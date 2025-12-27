@@ -8,11 +8,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"pier/internal/request"
+	"pier/internal/response"
+	"pier/internal/server"
 	"strings"
 	"syscall"
-	"tcp2http/internal/request"
-	"tcp2http/internal/response"
-	"tcp2http/internal/server"
 )
 
 func html(title, heading, msg string) []byte {

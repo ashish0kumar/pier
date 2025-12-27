@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"pier/internal/request"
+	"pier/internal/response"
 	"strings"
-	"tcp2http/internal/request"
-	"tcp2http/internal/response"
 	"testing"
 	"time"
 )

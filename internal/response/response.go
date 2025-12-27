@@ -3,7 +3,7 @@ package response
 import (
 	"fmt"
 	"io"
-	"tcp2http/internal/headers"
+	"pier/internal/headers"
 )
 
 type StatusCode int

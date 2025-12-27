@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"pier/internal/headers"
 	"strconv"
 	"strings"
-	"tcp2http/internal/headers"
 	"time"
 )
 
