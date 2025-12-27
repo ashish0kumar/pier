@@ -1,119 +1,115 @@
+headers
 package headers
 
 import (
 	"bytes"
-	"fmt"
+	"errors"
 	"strings"
 )
 
-func isToken(str []byte) bool {
-	for _, ch := range str {
-		found := false
-		if ch >= 'A' && ch <= 'Z' ||
-			ch >= 'a' && ch <= 'z' ||
-			ch >= '0' && ch <= '9' {
-			found = true
-		}
-		switch ch {
-		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
-			found = true
-		}
-
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
-var crlf = []byte("\r\n")
-
-func parseHeader(fieldLine []byte) (string, string, error) {
-	parts := bytes.SplitN(fieldLine, []byte(":"), 2)
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("malformed field line")
-	}
-
-	name := parts[0]
-	value := bytes.TrimSpace(parts[1])
-
-	if bytes.HasSuffix(name, []byte(" ")) {
-		return "", "", fmt.Errorf("malformed field name")
-	}
-
-	return string(name), string(value), nil
-}
-
 type Headers struct {
-	headers map[string]string
+	m map[string][]string
 }
 
-func NewHeaders() *Headers {
-	return &Headers{
-		headers: map[string]string{},
-	}
+var (
+	crlf         = []byte("\r\n")
+	ErrMalformed = errors.New("malformed headers")
+)
+
+func New() *Headers {
+	return &Headers{m: map[string][]string{}}
 }
 
 func (h *Headers) Get(name string) (string, bool) {
-	str, ok := h.headers[strings.ToLower(name)]
-	return str, ok
+	v := h.m[strings.ToLower(name)]
+	if len(v) == 0 {
+		return "", false
+	}
+	return v[0], true
+}
+
+func (h *Headers) Values(name string) []string {
+	return h.m[strings.ToLower(name)]
 }
 
 func (h *Headers) Set(name, value string) {
-	name = strings.ToLower(name)
-
-	if v, ok := h.headers[name]; ok {
-		h.headers[name] = fmt.Sprintf("%s,%s", v, value)
-	} else {
-		h.headers[name] = value
-	}
+	h.m[strings.ToLower(name)] = []string{value}
 }
 
-func (h *Headers) Replace(name, value string) {
-	name = strings.ToLower(name)
-	h.headers[name] = value
+func (h *Headers) Add(name, value string) {
+	k := strings.ToLower(name)
+	h.m[k] = append(h.m[k], value)
 }
 
 func (h *Headers) Delete(name string) {
-	name = strings.ToLower(name)
-	delete(h.headers, name)
+	delete(h.m, strings.ToLower(name))
 }
 
-func (h *Headers) ForEach(cb func(n, v string)) {
-	for n, v := range h.headers {
-		cb(n, v)
-	}
-}
-
-func (h *Headers) Parse(data []byte) (int, bool, error) {
+func Parse(b []byte) (*Headers, int, error) {
+	h := New()
 	read := 0
-	done := false
 
 	for {
-		idx := bytes.Index(data[read:], crlf)
-		if idx == -1 {
-			break
+		idx := bytes.Index(b[read:], crlf)
+		if idx < 0 {
+			return nil, 0, nil
 		}
 
-		// empty header
 		if idx == 0 {
-			done = true
-			read += len(crlf)
+			read += 2
 			break
 		}
 
-		name, value, err := parseHeader(data[read : read+idx])
-		if err != nil {
-			return 0, false, err
+		line := b[read : read+idx]
+		read += idx + 2
+
+		parts := bytes.SplitN(line, []byte(":"), 2)
+		if len(parts) != 2 {
+			return nil, 0, ErrMalformed
 		}
 
-		if !isToken([]byte(name)) {
-			return 0, false, fmt.Errorf("malformed header name")
+		name := strings.TrimSpace(string(parts[0]))
+		value := strings.TrimSpace(string(parts[1]))
+
+		if name == "" {
+			return nil, 0, ErrMalformed
 		}
 
-		read += idx + len(crlf)
-		h.Set(name, value)
+		h.Add(name, value)
 	}
 
-	return read, done, nil
+	return h, read, nil
+}
+
+func Format(h *Headers) []byte {
+	var buf bytes.Buffer
+	for k, vals := range h.m {
+		name := canonical(k)
+		for _, v := range vals {
+			buf.WriteString(name)
+			buf.WriteString(": ")
+			buf.WriteString(v)
+			buf.Write(crlf)
+		}
+	}
+	buf.Write(crlf)
+	return buf.Bytes()
+}
+
+func canonical(k string) string {
+	parts := strings.Split(k, "-")
+	for i := range parts {
+		if len(parts[i]) > 0 {
+			parts[i] = strings.ToUpper(parts[i][:1]) + strings.ToLower(parts[i][1:])
+		}
+	}
+	return strings.Join(parts, "-")
+}
+
+func (h *Headers) Canonical() map[string][]string {
+	out := map[string][]string{}
+	for k, v := range h.m {
+		out[canonical(k)] = v
+	}
+	return out
 }
