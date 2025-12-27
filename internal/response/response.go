@@ -4,11 +4,7 @@ import (
 	"fmt"
 	"io"
 	"tcp2http/internal/headers"
-	"tcp2http/internal/request"
 )
-
-type Response struct {
-}
 
 type StatusCode int
 
@@ -18,60 +14,55 @@ const (
 	StatusInternalServerError StatusCode = 500
 )
 
-type HandlerError struct {
-	StatusCode StatusCode
-	Message    string
-}
-
-type Handler func(w io.Writer, req *request.Request) *HandlerError
-
-func GetDefaultHeaders(contentLen int) *headers.Headers {
-	h := headers.NewHeaders()
-	h.Set("Content-Length", fmt.Sprintf("%d", contentLen))
-	h.Set("Connection", "close")
-	h.Set("Content-Type", "text/plain")
-
-	return h
+func status(code StatusCode) string {
+	switch code {
+	case StatusOK:
+		return "HTTP/1.1 200 OK\r\n"
+	case StatusBadRequest:
+		return "HTTP/1.1 400 Bad Request\r\n"
+	default:
+		return "HTTP/1.1 500 Internal Server Error\r\n"
+	}
 }
 
 type Writer struct {
-	writer io.Writer
+	w io.Writer
 }
 
-func NewWriter(writer io.Writer) *Writer {
-	return &Writer{writer: writer}
+func New(w io.Writer) *Writer {
+	return &Writer{w: w}
 }
 
-func (w *Writer) WriteStatusLine(statusCode StatusCode) error {
-	statusLine := []byte{}
-
-	switch statusCode {
-	case StatusOK:
-		statusLine = []byte("HTTP/1.1 200 OK\r\n")
-	case StatusBadRequest:
-		statusLine = []byte("HTTP/1.1 400 Bad Request\r\n")
-	case StatusInternalServerError:
-		statusLine = []byte("HTTP/1.1 500 Internal Server Error\r\n")
-	default:
-		return fmt.Errorf("unrecognised error code")
+func DefaultHeaders(len int, ct string, keepAlive bool) *headers.Headers {
+	h := headers.New()
+	h.Set("Content-Length", fmt.Sprintf("%d", len))
+	h.Set("Content-Type", ct)
+	if keepAlive {
+		h.Set("Connection", "keep-alive")
+	} else {
+		h.Set("Connection", "close")
 	}
-
-	_, err := w.writer.Write(statusLine)
-	return err
+	return h
 }
 
-func (w *Writer) WriteHeaders(h headers.Headers) error {
-	b := []byte{}
-	h.ForEach(func(n, v string) {
-		b = fmt.Appendf(b, "%s: %s\r\n", n, v)
-	})
-	b = fmt.Append(b, "\r\n")
-
-	_, err := w.writer.Write(b)
-	return err
+func (wr *Writer) Write(code StatusCode, h *headers.Headers, body []byte) {
+	wr.w.Write([]byte(status(code)))
+	wr.w.Write(headers.Format(h))
+	if body != nil {
+		wr.w.Write(body)
+	}
 }
 
-func (w *Writer) WriteBody(p []byte) (int, error) {
-	n, err := w.writer.Write(p)
-	return n, err
+func (wr *Writer) WriteChunk(b []byte) {
+	fmt.Fprintf(wr.w, "%x\r\n", len(b))
+	wr.w.Write(b)
+	wr.w.Write([]byte("\r\n"))
+}
+
+func (wr *Writer) EndChunked() {
+	wr.w.Write([]byte("0\r\n\r\n"))
+}
+
+func (wr *Writer) WriteRaw(b []byte) {
+	wr.w.Write(b)
 }
