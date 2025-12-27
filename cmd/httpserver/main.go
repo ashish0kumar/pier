@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -9,140 +10,125 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"tcp2http/internal/headers"
 	"tcp2http/internal/request"
 	"tcp2http/internal/response"
 	"tcp2http/internal/server"
 )
 
-func toStr(bytes []byte) string {
-	out := ""
-	for _, b := range bytes {
-		out += fmt.Sprintf("%02x", b)
+func html(title, heading, msg string) []byte {
+	b := make([]byte, 0, 256)
+	b = fmt.Appendf(
+		b,
+		`<html>
+<head>
+	<title>%s</title>
+</head>
+<body>
+	<h1>%s</h1>
+	<p>%s</p>
+</body>
+</html>`,
+		title,
+		heading,
+		msg,
+	)
+	return b
+}
+
+func logging(next server.Handler) server.Handler {
+	return func(w *response.Writer, r *request.Request) {
+		log.Printf("%s %s", r.Method, r.Target)
+		next(w, r)
 	}
-	return out
 }
 
-const port = 42069
+func handleHttpBin(w *response.Writer, path string) {
+	res, err := http.Get("https://httpbin.org/" + path)
+	if err != nil {
+		body := html("500", "Internal Server Error", "Proxy failed")
+		headers := response.DefaultHeaders(len(body), "text/html", false)
+		w.Write(response.StatusInternalServerError, headers, body)
+		return
+	}
+	defer res.Body.Close()
 
-func respond400() []byte {
-	return []byte(`<html>
-  <head>
-    <title>400 Bad Request</title>
-  </head>
-  <body>
-    <h1>Bad Request</h1>
-    <p>Your request honestly kinda sucked.</p>
-  </body>
-</html>`)
-}
+	var all []byte
+	buf := make([]byte, 1024)
 
-func respon500() []byte {
-	return []byte(`<html>
-  <head>
-    <title>500 Internal Server Error</title>
-  </head>
-  <body>
-    <h1>Internal Server Error</h1>
-    <p>Okay, you know what? This one is on me.</p>
-  </body>
-</html>`)
-}
+	w.WriteRaw([]byte("HTTP/1.1 200 OK\r\n"))
+	w.WriteRaw([]byte("Transfer-Encoding: chunked\r\n"))
+	w.WriteRaw([]byte("Content-Type: text/plain\r\n"))
+	w.WriteRaw([]byte("Trailer: X-Content-SHA256, X-Content-Length\r\n\r\n"))
 
-func respond200() []byte {
-	return []byte(`<html>
-  <head>
-    <title>200 OK</title>
-  </head>
-  <body>
-    <h1>Success!</h1>
-    <p>Your request was an absolute banger.</p>
-  </body>
-</html>`)
+	for {
+		n, err := res.Body.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			all = append(all, chunk...)
+			w.WriteChunk(chunk)
+		}
+
+		if err != nil {
+			break
+		}
+	}
+
+	w.EndChunked()
+
+	sum := sha256.Sum256(all)
+
+	w.WriteRaw([]byte("X-Content-SHA256: "))
+	w.WriteRaw([]byte(hex.EncodeToString(sum[:])))
+	w.WriteRaw([]byte("\r\n"))
+
+	buf = make([]byte, 0, 64)
+	buf = fmt.Appendf(buf, "X-Content-Length: %d\r\n\r\n", len(all))
+	w.WriteRaw(buf)
 }
 
 func main() {
-	s, err := server.Serve(port, func(w *response.Writer, req *request.Request) {
-		h := response.GetDefaultHeaders(0)
-		body := respond200()
-		status := response.StatusOK
+	handler := func(w *response.Writer, r *request.Request) {
+		switch {
+		case r.Target == "/bad":
+			body := html("400", "Bad Request", "Invalid request")
+			headers := response.DefaultHeaders(len(body), "text/html", false)
+			w.Write(response.StatusBadRequest, headers, body)
 
-		if req.RequestLine.RequestTarget == "/yourproblem" {
-			body = respond400()
-			status = response.StatusBadRequest
-
-		} else if req.RequestLine.RequestTarget == "/myproblem" {
-			body = respon500()
-			status = response.StatusInternalServerError
-
-		} else if req.RequestLine.RequestTarget == "/video" {
-			f, _ := os.ReadFile("assets/ex.mp4")
-			h.Replace("content-type", "video/mp4")
-			h.Replace("content-length", fmt.Sprintf("%d", len(f)))
-
-			w.WriteStatusLine(response.StatusOK)
-			w.WriteHeaders(*h)
-			w.WriteBody(f)
-
-		} else if strings.HasPrefix(req.RequestLine.RequestTarget, "/httpbin/") {
-			target := req.RequestLine.RequestTarget
-			res, err := http.Get("https://httpbin.org/" + target[len("/httpbin/"):])
-
+		case r.Target == "/video":
+			data, err := os.ReadFile("assets/video.mp4")
 			if err != nil {
-				body = respon500()
-				status = response.StatusInternalServerError
-
-			} else {
-				w.WriteStatusLine(response.StatusOK)
-
-				h.Delete("Content-length")
-				h.Set("transfer-encoding", "chunked")
-				h.Replace("content-type", "text/plain")
-				h.Set("Trailer", "X-Content-SHA256")
-				h.Set("Trailer", "X-Content-Length")
-				w.WriteHeaders(*h)
-
-				fullBody := []byte{}
-				for {
-					data := make([]byte, 32)
-					n, err := res.Body.Read(data)
-					if err != nil {
-						break
-					}
-
-					fullBody = append(fullBody, data[:n]...)
-					w.WriteBody([]byte(fmt.Sprintf("%x\r\n", n)))
-					w.WriteBody(data[:n])
-					w.WriteBody([]byte("\r\n"))
-				}
-
-				w.WriteBody([]byte("0\r\n"))
-				trailers := headers.NewHeaders()
-				out := sha256.Sum256(fullBody)
-
-				trailers.Set("X-Content-SHA256", toStr(out[:]))
-				trailers.Set("X-Content-Length", fmt.Sprintf("%d", len(fullBody)))
-				w.WriteHeaders(*trailers)
-
+				body := html("500", "Internal Server Error", "Unable to load resource")
+				headers := response.DefaultHeaders(len(body), "text/html", false)
+				w.Write(response.StatusInternalServerError, headers, body)
 				return
 			}
-		}
 
-		h.Replace("Content-length", fmt.Sprintf("%d", len(body)))
-		h.Replace("Content-type", "text/html")
-		w.WriteStatusLine(status)
-		w.WriteHeaders(*h)
-		w.WriteBody(body)
-	})
+			headers := response.DefaultHeaders(len(data), "video/mp4", true)
+			w.Write(response.StatusOK, headers, data)
+
+		case strings.HasPrefix(r.Target, "/httpbin/"):
+			target := strings.TrimPrefix(r.Target, "/httpbin/")
+			handleHttpBin(w, target)
+
+		default:
+			body := html("200", "OK", "Request successful")
+			headers := response.DefaultHeaders(len(body), "text/html", true)
+			w.Write(response.StatusOK, headers, body)
+		}
+	}
+
+	s, err := server.Serve(42069, handler, logging)
 
 	if err != nil {
-		log.Fatalf("Error starting server: %v", err)
+		log.Fatal(err)
 	}
 	defer s.Close()
-	log.Println("Server started on port", port)
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
-	log.Println("Server gracefully stopped")
+	log.Println("Server running on port 42069")
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+
+	<-signals
+	log.Println("Server shutting down")
 }

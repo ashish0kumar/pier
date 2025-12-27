@@ -8,33 +8,41 @@ import (
 )
 
 func main() {
-	listener, err := net.Listen("tcp", ":42069")
+	l, err := net.Listen("tcp", ":42069")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	for {
-		conn, err := listener.Accept()
+		c, err := l.Accept()
 		if err != nil {
-			log.Fatal(err)
+			log.Println("accept error:", err)
+			continue
 		}
 
-		r, err := request.RequestFromReader(conn)
-		if err != nil {
-			log.Fatal(err)
-		}
+		go func(conn net.Conn) {
+			defer conn.Close()
 
-		fmt.Printf("Request line:\n")
-		fmt.Printf("- Method: %s\n", r.RequestLine.Method)
-		fmt.Printf("- Target: %s\n", r.RequestLine.RequestTarget)
-		fmt.Printf("- Version: %s\n", r.RequestLine.HttpVersion)
+			r, err := request.RequestFromReader(conn)
+			if err != nil {
+				log.Println("bad request:", err)
+				return
+			}
 
-		fmt.Printf("Headers:\n")
-		r.Headers.ForEach(func(n, v string) {
-			fmt.Printf("- %s: %s\n", n, v)
-		})
+			fmt.Println("Method:", r.Method)
+			fmt.Println("Target:", r.Target)
+			fmt.Println("Version:", r.Version)
 
-		fmt.Printf("Body:\n")
-		fmt.Printf("%s\n", r.Body)
+			fmt.Println("Headers:")
+			for name, values := range r.Headers.Canonical() {
+				for _, v := range values {
+					fmt.Printf("- %s: %s\n", name, v)
+				}
+			}
+
+			fmt.Println("Body:")
+			fmt.Println(string(r.Body))
+
+		}(c)
 	}
 }
