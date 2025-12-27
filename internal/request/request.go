@@ -2,202 +2,127 @@ package request
 
 import (
 	"bytes"
-	"fmt"
+	"errors"
 	"io"
 	"strconv"
+	"strings"
 	"tcp2http/internal/headers"
+	"time"
 )
-
-type parserState string
-
-const (
-	StateInit    parserState = "init"
-	StateHeaders parserState = "headers"
-	StateBody    parserState = "body"
-	StateDone    parserState = "done"
-	StateError   parserState = "error"
-)
-
-type RequestLine struct {
-	HttpVersion   string
-	RequestTarget string
-	Method        string
-}
 
 type Request struct {
-	RequestLine RequestLine
-	Headers     *headers.Headers
-	Body        string
-
-	state parserState
+	Method  string
+	Target  string
+	Version string
+	Headers *headers.Headers
+	Body    []byte
 }
 
-func getInt(headers *headers.Headers, name string, defaultValue int) int {
-	valueStr, exists := headers.Get(name)
-	if !exists {
-		return defaultValue
-	}
+var (
+	ErrMalformed = errors.New("malformed request")
+	ErrTimeout   = errors.New("request timeout")
+)
 
-	value, err := strconv.Atoi(valueStr)
-	if err != nil {
-		return defaultValue
-	}
-	return value
-}
+func readUntil(r io.Reader, delim []byte, timeout time.Duration) ([]byte, error) {
+	buf := make([]byte, 0, 2048)
+	tmp := make([]byte, 512)
 
-func newRequest() *Request {
-	return &Request{
-		state:   StateInit,
-		Headers: headers.NewHeaders(),
-		Body:    "",
-	}
-}
+	deadline := time.Now().Add(timeout)
 
-var ErrorMalformedRequestLine = fmt.Errorf("malformed request-line")
-var ErrorRequestInErrorState = fmt.Errorf("request in error state")
-var crlf = []byte("\r\n")
-
-func parseRequestLine(b []byte) (*RequestLine, int, error) {
-	idx := bytes.Index(b, crlf)
-	if idx == -1 {
-		return nil, 0, nil
-	}
-
-	startLine := b[:idx]
-	read := idx + len(crlf)
-
-	parts := bytes.Split(startLine, []byte(" "))
-	if len(parts) != 3 {
-		return nil, 0, ErrorMalformedRequestLine
-	}
-
-	httpParts := bytes.Split(parts[2], []byte("/"))
-	if len(httpParts) != 2 || string(httpParts[0]) != "HTTP" || string(httpParts[1]) != "1.1" {
-		return nil, 0, ErrorMalformedRequestLine
-	}
-
-	rl := &RequestLine{
-		Method:        string(parts[0]),
-		RequestTarget: string(parts[1]),
-		HttpVersion:   string(httpParts[1]),
-	}
-
-	return rl, read, nil
-}
-
-func (r *Request) hasBody() bool {
-	length := getInt(r.Headers, "content-length", 0)
-	return length > 0
-}
-
-func (r *Request) parse(data []byte) (int, error) {
-
-	read := 0
-
-outer:
 	for {
-		currentData := data[read:]
+		if time.Now().After(deadline) {
+			return nil, ErrTimeout
+		}
 
-		switch r.state {
-		case StateError:
-			return 0, ErrorRequestInErrorState
-
-		case StateInit:
-			rl, n, err := parseRequestLine(currentData)
-			if err != nil {
-				r.state = StateError
-				return 0, err
+		n, err := r.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+			if bytes.Contains(buf, delim) {
+				return buf, nil
 			}
+		}
 
-			if n == 0 {
-				break outer
+		if err != nil {
+			if err == io.EOF {
+				return buf, nil
 			}
-
-			r.RequestLine = *rl
-			read += n
-			r.state = StateHeaders
-
-		case StateHeaders:
-			n, done, err := r.Headers.Parse(currentData)
-			if err != nil {
-				r.state = StateError
-				return 0, err
-			}
-
-			if n == 0 {
-				break outer
-			}
-
-			read += n
-
-			if done {
-				if r.hasBody() {
-					r.state = StateBody
-				} else {
-					r.state = StateDone
-				}
-			}
-
-		case StateBody:
-			length := getInt(r.Headers, "content-length", 0)
-			if length == 0 {
-				panic("chunked encoding not implemented")
-			}
-
-			if len(currentData) == 0 {
-				break outer
-			}
-
-			remaining := min(length-len(r.Body), len(currentData))
-			r.Body += string(currentData[:remaining])
-			read += remaining
-
-			if len(r.Body) == length {
-				r.state = StateDone
-			}
-
-		case StateDone:
-			break outer
-
-		default:
-			panic("error")
+			return nil, err
 		}
 	}
-	return read, nil
 }
 
-func (r *Request) done() bool {
-	return r.state == StateDone || r.state == StateError
+func parseRequestLine(line string) (string, string, string, error) {
+	parts := strings.Split(line, " ")
+	if len(parts) != 3 {
+		return "", "", "", ErrMalformed
+	}
+	if !strings.HasPrefix(parts[2], "HTTP/") {
+		return "", "", "", ErrMalformed
+	}
+	return parts[0], parts[1], strings.TrimPrefix(parts[2], "HTTP/"), nil
 }
 
-func RequestFromReader(reader io.Reader) (*Request, error) {
-	request := newRequest()
-
-	// NOTE: buffer could get overrun by a header that exceeds 1k or the body
+func parseChunked(r io.Reader) ([]byte, error) {
+	var body []byte
 	buf := make([]byte, 1024)
-	bufLen := 0
 
-	for !request.done() {
-		n, err := reader.Read(buf[bufLen:])
-		if err == io.EOF {
-			if !request.done() {
-				return nil, fmt.Errorf("unexpected EOF")
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			body = append(body, buf[:n]...)
+			if bytes.Contains(body, []byte("\r\n0\r\n")) {
+				return body, nil
 			}
-			break
 		}
 		if err != nil {
-			return nil, err
+			return body, err
 		}
+	}
+}
 
-		bufLen += n
-		readN, err := request.parse(buf[:bufLen])
-		if err != nil {
-			return nil, err
-		}
-
-		copy(buf, buf[readN:bufLen])
-		bufLen -= readN
+func RequestFromReader(r io.Reader) (*Request, error) {
+	data, err := readUntil(r, []byte("\r\n\r\n"), 5*time.Second)
+	if err != nil {
+		return nil, err
 	}
 
-	return request, nil
+	idx := bytes.Index(data, []byte("\r\n"))
+	if idx < 0 {
+		return nil, ErrMalformed
+	}
+
+	line := strings.TrimRight(string(data[:idx]), "\r\n")
+	method, target, version, err := parseRequestLine(line)
+	if err != nil {
+		return nil, err
+	}
+
+	h, n, err := headers.Parse(data[idx+2:])
+	if err != nil {
+		return nil, err
+	}
+
+	bodyStart := idx + 2 + n
+	body := data[bodyStart:]
+
+	req := &Request{Method: method, Target: target, Version: version, Headers: h}
+
+	if te, ok := h.Get("Transfer-Encoding"); ok && strings.Contains(strings.ToLower(te), "chunked") {
+		chunked, _ := parseChunked(r)
+		req.Body = append(body, chunked...)
+		return req, nil
+	}
+
+	if cl, ok := h.Get("Content-Length"); ok {
+		n, _ := strconv.Atoi(cl)
+		remaining := n - len(body)
+		if remaining > 0 {
+			buf := make([]byte, remaining)
+			io.ReadFull(r, buf)
+			body = append(body, buf...)
+		}
+	}
+
+	req.Body = body
+	return req, nil
 }
