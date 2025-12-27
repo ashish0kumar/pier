@@ -1,4 +1,3 @@
-headers
 package headers
 
 import (

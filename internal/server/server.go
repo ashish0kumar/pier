@@ -2,67 +2,73 @@ package server
 
 import (
 	"fmt"
-	"io"
 	"net"
 	"tcp2http/internal/request"
 	"tcp2http/internal/response"
+	"time"
 )
 
-type HandlerError struct {
-	StatusCode response.StatusCode
-	Message    string
-}
-
-type Handler func(w *response.Writer, req *request.Request)
+type Handler func(w *response.Writer, r *request.Request)
+type Middleware func(next Handler) Handler
 
 type Server struct {
-	closed  bool
-	handler Handler
+	l net.Listener
+	m []Middleware
+	h Handler
 }
 
-func runConnection(s *Server, conn io.ReadWriteCloser) {
-	defer conn.Close()
-
-	responseWriter := response.NewWriter(conn)
-	r, err := request.RequestFromReader(conn)
-	if err != nil {
-		responseWriter.WriteStatusLine(response.StatusBadRequest)
-		responseWriter.WriteHeaders(*response.GetDefaultHeaders(0))
-		return
+func wrap(h Handler, m []Middleware) Handler {
+	for i := len(m) - 1; i >= 0; i-- {
+		h = m[i](h)
 	}
-
-	s.handler(responseWriter, r)
+	return h
 }
 
-func runServer(s *Server, listener net.Listener) {
-	for {
-		conn, err := listener.Accept()
-		if s.closed {
-			return
-		}
-		if err != nil {
-			return
-		}
-		go runConnection(s, conn)
-	}
-}
-
-func Serve(port uint16, handler Handler) (*Server, error) {
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+func Serve(port uint16, h Handler, middleware ...Middleware) (*Server, error) {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, err
 	}
 
-	server := &Server{
-		closed:  false,
-		handler: handler,
-	}
-	go runServer(server, listener)
+	s := &Server{l: ln, m: middleware, h: wrap(h, middleware)}
+	go s.loop()
+	return s, nil
+}
 
-	return server, nil
+func (s *Server) loop() {
+	for {
+		conn, err := s.l.Accept()
+		if err != nil {
+			return
+		}
+		go s.handle(conn)
+	}
+}
+
+func (s *Server) handle(c net.Conn) {
+	defer c.Close()
+
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		r, err := request.RequestFromReader(c)
+
+		if err != nil {
+			writer := response.New(c)
+			headers := response.DefaultHeaders(0, "text/plain", false)
+			body := []byte("Bad Request")
+			writer.Write(response.StatusBadRequest, headers, body)
+			return
+		}
+
+		w := response.New(c)
+		s.h(w, r)
+
+		if conn, ok := r.Headers.Get("Connection"); ok && conn == "close" {
+			return
+		}
+	}
 }
 
 func (s *Server) Close() error {
-	s.closed = true
-	return nil
+	return s.l.Close()
 }
